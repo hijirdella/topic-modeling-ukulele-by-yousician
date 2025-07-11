@@ -1,4 +1,7 @@
 streamlit
 pandas
-scikit-learn
-joblib
+gensim
+numpy
+matplotlib
+seaborn
+pytz
