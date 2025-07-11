@@ -1,102 +1,96 @@
 import streamlit as st
-import joblib
 import pandas as pd
+import re
+import joblib
+import gensim
+from gensim.corpora import Dictionary
+from gensim.models import LdaModel
 from datetime import datetime
 import pytz
 
-# --- Load model dan komponen ---
-model = joblib.load('RidgeClassifier - Perfect Piano.pkl')
-vectorizer = joblib.load('tfidf_vectorizer_Perfect Piano.pkl')
-label_encoder = joblib.load('label_encoder_Perfect Piano.pkl')
+# === Load Model dan Dictionary ===
+lda_model = LdaModel.load("best_lda_ukelele_by_yousician.gensim")
+dictionary = Dictionary.load("best_lda_ukelele_by_yousician.gensim.id2word")
 
-# --- Judul App ---
-st.title("🎹 Sentiment Analysis - Perfect Piano App")
+# === Preprocessing ===
+def clean_text(text):
+    text = text.lower()
+    text = re.sub(r'<.*?>', ' ', text)
+    text = re.sub(r'http\S+|www.\S+', ' ', text)
+    text = re.sub(r'[^a-z\s]', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
-# --- Pilih Mode ---
-st.header("Pilih Metode Input")
-input_mode = st.radio("Mode Input:", ["📝 Input Manual", "📁 Upload CSV"])
+def tokenize(text):
+    return clean_text(text).split()
 
-# ========================================
-# 📌 MODE 1: INPUT MANUAL
-# ========================================
+def get_dominant_topic(text):
+    bow = dictionary.doc2bow(tokenize(text))
+    topics = lda_model.get_document_topics(bow)
+    if topics:
+        dominant_topic, prob = max(topics, key=lambda x: x[1])
+        return dominant_topic, round(prob, 3)
+    else:
+        return None, 0.0
+
+# === Streamlit UI ===
+st.set_page_config(page_title="Topic Modeling - Ukulele by Yousician", layout="wide")
+st.title("🧠 Topic Modeling - Ukulele by Yousician")
+
+input_mode = st.radio("Pilih Mode Input:", ["📝 Input Manual", "📁 Upload CSV"])
+
+# === Input Manual ===
 if input_mode == "📝 Input Manual":
-    st.subheader("Masukkan 1 Review Pengguna")
-
-    name = st.text_input("👤 Nama Pengguna:")
-    star_rating = st.selectbox("⭐ Bintang Rating:", [1, 2, 3, 4, 5])
-    user_review = st.text_area("💬 Review:")
-
-    # Gunakan waktu default dalam zona Asia/Jakarta
-    wib = pytz.timezone("Asia/Jakarta")
-    now_wib = datetime.now(wib)
-
-    review_day = st.date_input("📅 Tanggal Submit:", value=now_wib.date())
-    review_time = st.time_input("⏰ Waktu Submit:", value=now_wib.time())
-
-    # Gabungkan tanggal dan waktu (tanpa menggeser waktu)
-    review_datetime = datetime.combine(review_day, review_time)
-    review_datetime_wib = wib.localize(review_datetime)
-    review_date_str = review_datetime_wib.strftime("%Y-%m-%d %H:%M")
-
-    if st.button("Prediksi Sentimen"):
-        if user_review.strip() == "":
-            st.warning("🚨 Silakan isi review terlebih dahulu.")
+    name = st.text_input("Nama Pengguna:")
+    review = st.text_area("Masukkan Review:")
+    
+    if st.button("Deteksi Topik"):
+        if review.strip() == "":
+            st.warning("Review tidak boleh kosong.")
         else:
-            vec = vectorizer.transform([user_review])
-            pred = model.predict(vec)
-            label = label_encoder.inverse_transform(pred)[0]
-
-            # Buat hasil sebagai DataFrame
-            result_df = pd.DataFrame([{
-                "name": name if name else "(Anonim)",
-                "star_rating": star_rating,
-                "date": review_date_str,
-                "review": user_review,
-                "predicted_sentiment": label
+            topic, prob = get_dominant_topic(review)
+            now = datetime.now(pytz.timezone("Asia/Jakarta"))
+            df = pd.DataFrame([{
+                "Name": name if name else "(Anonim)",
+                "Review": review,
+                "Predicted Topic": topic,
+                "Probability": prob,
+                "Datetime (WIB)": now.strftime("%Y-%m-%d %H:%M")
             }])
+            st.success("✅ Topik berhasil diprediksi!")
+            st.dataframe(df)
 
-            st.success("✅ Prediksi berhasil!")
-            st.dataframe(result_df)
-
-            # Tombol Download
-            csv_manual = result_df.to_csv(index=False).encode('utf-8')
+            # Tombol download
             st.download_button(
-                label="📥 Download Hasil Manual sebagai CSV",
-                data=csv_manual,
-                file_name="manual_review_prediction_perfect_piano.csv",
+                label="📥 Download Hasil",
+                data=df.to_csv(index=False),
+                file_name="topic_prediction_manual.csv",
                 mime="text/csv"
             )
 
-# ========================================
-# 📁 MODE 2: UPLOAD CSV
-# ========================================
+# === Input Batch CSV ===
 else:
-    st.subheader("Upload File CSV Review")
-    uploaded_file = st.file_uploader("Pilih file CSV (harus memiliki kolom 'review')", type=['csv'])
-
+    uploaded_file = st.file_uploader("Upload file CSV dengan kolom 'review':", type="csv")
     if uploaded_file:
         try:
             df = pd.read_csv(uploaded_file)
-
-            # Validasi kolom
             if 'review' not in df.columns:
-                st.error("❌ File harus memiliki kolom 'review'.")
+                st.error("❌ Kolom 'review' tidak ditemukan.")
             else:
-                # Prediksi
-                X_vec = vectorizer.transform(df['review'].fillna(""))
-                y_pred = model.predict(X_vec)
-                df['predicted_sentiment'] = label_encoder.inverse_transform(y_pred)
+                df['cleaned_review'] = df['review'].fillna("").apply(clean_text)
+                df['tokens'] = df['cleaned_review'].apply(lambda x: x.split())
+                df['bow'] = df['tokens'].apply(lambda x: dictionary.doc2bow(x))
+                df['Predicted Topic'] = df['bow'].apply(lambda x: max(lda_model.get_document_topics(x), key=lambda t: t[1])[0] if x else None)
+                df['Probability'] = df['bow'].apply(lambda x: round(max(lda_model.get_document_topics(x), key=lambda t: t[1])[1], 3) if x else 0.0)
 
-                st.success("✅ Prediksi berhasil!")
-                st.dataframe(df.head())
+                st.success("✅ Topik berhasil diprediksi!")
+                st.dataframe(df[['review', 'Predicted Topic', 'Probability']])
 
-                # Download hasil
-                csv_result = df.to_csv(index=False).encode('utf-8')
                 st.download_button(
-                    label="📥 Download Hasil CSV",
-                    data=csv_result,
-                    file_name="predicted_reviews_perfect_piano.csv",
+                    label="📥 Download Hasil Prediksi",
+                    data=df.to_csv(index=False),
+                    file_name="topic_prediction_batch.csv",
                     mime="text/csv"
                 )
         except Exception as e:
-            st.error(f"❌ Terjadi error saat membaca file: {e}")
+            st.error(f"❌ Terjadi kesalahan: {e}")
